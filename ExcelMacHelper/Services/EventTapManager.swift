@@ -23,20 +23,41 @@ class EventTapManager: ObservableObject {
     // F1-F12 virtual key codes
     private static let functionKeyCodes: Set<CGKeyCode> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
 
-    // NX media key type to F-key virtual keycode mapping (standard MacBook layout)
+    // Comprehensive NX media key type to F-key virtual keycode mapping
+    // These key types are from NX_SYSDEFINED (type 14) events when "Use F1-F12 as standard
+    // function keys" is OFF in System Settings (the macOS default).
+    // Key types vary by Mac model — these cover MacBook built-in and common external keyboards.
     private static let mediaKeyToFKey: [Int: CGKeyCode] = [
-        3: 122,   // Brightness Down → F1
-        2: 120,   // Brightness Up → F2
-        22: 96,   // Keyboard Brightness Down / Dictation → F5
-        21: 97,   // Keyboard Brightness Up / Do Not Disturb → F6
-        18: 98,   // Previous Track → F7
-        20: 98,   // Rewind → F7 (alternative)
-        16: 100,  // Play/Pause → F8
-        17: 101,  // Next Track → F9
-        19: 101,  // Fast Forward → F9 (alternative)
-        7: 109,   // Mute → F10
-        1: 103,   // Volume Down → F11
-        0: 111,   // Volume Up → F12
+        // F1/F2: Brightness Down/Up
+        3: 122,    // Brightness Down → F1
+        2: 120,    // Brightness Up → F2
+        // F3: Mission Control / Exposé
+        160: 99,   // Mission Control → F3
+        // F4: Launchpad / Spotlight
+        130: 118,  // Launchpad → F4
+        131: 118,  // Spotlight (alternative) → F4
+        // F5/F6: Keyboard Brightness / Dictation / DND
+        22: 96,    // Keyboard Brightness Down / Dictation → F5
+        21: 97,    // Keyboard Brightness Up / Do Not Disturb → F6
+        // F7/F8/F9: Media playback
+        18: 98,    // Previous Track → F7
+        20: 98,    // Rewind → F7 (alternative)
+        16: 100,   // Play/Pause → F8
+        17: 101,   // Next Track → F9
+        19: 101,   // Fast Forward → F9 (alternative)
+        // F10/F11/F12: Volume
+        7: 109,    // Mute → F10
+        1: 103,    // Volume Down → F11
+        0: 111,    // Volume Up → F12
+    ]
+
+    // Human-readable names for NX media key types (for logging)
+    private static let mediaKeyNames: [Int: String] = [
+        0: "Volume Up", 1: "Volume Down", 2: "Brightness Up", 3: "Brightness Down",
+        7: "Mute", 16: "Play/Pause", 17: "Next Track", 18: "Previous Track",
+        19: "Fast Forward", 20: "Rewind", 21: "KB Brightness Up/DND",
+        22: "KB Brightness Down/Dictation", 130: "Launchpad", 131: "Spotlight",
+        160: "Mission Control",
     ]
 
     init() {
@@ -73,7 +94,7 @@ class EventTapManager: ObservableObject {
             userInfo: nil
         ) {
             tap = fullTap
-            Logger.log("Event tap created with media key support")
+            Logger.log("Event tap created with media key support (NX_SYSDEFINED)")
         } else if let basicTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -129,15 +150,21 @@ class EventTapManager: ObservableObject {
             return event
         }
 
-        // Feature 1: Intercept media key events and convert to F-keys
-        if shouldRemapFunctionKeys?() == true && type.rawValue == 14 {
-            return handleMediaKeyEvent(event: event)
+        // Feature 1: Intercept media key events (NX_SYSDEFINED, type 14) and convert to F-keys
+        if type.rawValue == 14 {
+            if shouldRemapFunctionKeys?() == true {
+                return handleMediaKeyEvent(event: event)
+            } else {
+                // Still log NX_SYSDEFINED events for debugging even when not remapping
+                logMediaKeyEvent(event: event)
+                return event
+            }
         }
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
 
-        // Feature 1: Function Key Remapping (for keyboard F-key events)
+        // Feature 1: Function Key Remapping (for keyboard F-key events that arrive as keyDown)
         if shouldRemapFunctionKeys?() == true {
             if let remapped = handleFunctionKeyRemap(keyCode: keyCode, flags: flags, type: type, event: event) {
                 return remapped
@@ -158,6 +185,22 @@ class EventTapManager: ObservableObject {
 
     // MARK: - Feature 1: Media Key Interception
 
+    /// Log NX_SYSDEFINED media key event details for debugging
+    private func logMediaKeyEvent(event: CGEvent) {
+        guard let nsEvent = NSEvent(cgEvent: event) else { return }
+        guard nsEvent.subtype.rawValue == 8 else { return }
+
+        let data1 = nsEvent.data1
+        let keyType = (data1 & 0xFFFF0000) >> 16
+        let keyFlags = data1 & 0x0000FFFF
+        let keyState = (keyFlags & 0xFF00) >> 8
+        let isKeyDown = keyState == 0x0A
+
+        let keyName = Self.mediaKeyNames[keyType] ?? "Unknown"
+        let mapped = Self.mediaKeyToFKey[keyType] != nil ? "mapped" : "UNMAPPED"
+        Logger.debug("NX_SYSDEFINED: keyType=\(keyType) (\(keyName)) state=\(isKeyDown ? "down" : "up") [\(mapped)]")
+    }
+
     /// Handle NX_SYSDEFINED media key events and convert them to F-key events
     private func handleMediaKeyEvent(event: CGEvent) -> CGEvent? {
         guard let nsEvent = NSEvent(cgEvent: event) else { return event }
@@ -174,8 +217,13 @@ class EventTapManager: ObservableObject {
 
         guard isKeyDown || isKeyUp else { return event }
 
+        let keyName = Self.mediaKeyNames[keyType] ?? "Unknown(\(keyType))"
+
         // Map the media key type to an F-key virtual keycode
-        guard let fKeyCode = Self.mediaKeyToFKey[keyType] else { return event }
+        guard let fKeyCode = Self.mediaKeyToFKey[keyType] else {
+            Logger.debug("NX_SYSDEFINED: Unmapped media key type \(keyType) (\(keyName)), passing through")
+            return event
+        }
 
         // Create a synthetic F-key keyboard event
         let source = CGEventSource(stateID: .hidSystemState)
@@ -183,12 +231,21 @@ class EventTapManager: ObservableObject {
             keyboardEventSource: source,
             virtualKey: fKeyCode,
             keyDown: isKeyDown
-        ) else { return event }
+        ) else {
+            Logger.error("Failed to create synthetic F-key event for keyType \(keyType)")
+            return event
+        }
 
+        // Set the fn flag so the system treats it as a standard function key
         syntheticEvent.flags = [.maskSecondaryFn]
 
-        Logger.debug("Converted media key type \(keyType) to F-key \(fKeyCode)")
-        return syntheticEvent
+        // Post the synthetic F-key event separately
+        syntheticEvent.post(tap: .cghidEventTap)
+
+        Logger.debug("Converted media key \(keyName) (type \(keyType)) -> F-key code \(fKeyCode), suppressed original")
+
+        // Return nil to suppress the original media key event
+        return nil
     }
 
     // MARK: - Feature 1: Function Key Remapping

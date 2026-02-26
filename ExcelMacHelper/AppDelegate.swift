@@ -113,6 +113,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         reloadItem.target = self
         menu.addItem(reloadItem)
 
+        // Discover Excel menus (debug helper)
+        let discoverItem = NSMenuItem(title: "Discover Excel Menus", action: #selector(discoverMenus), keyEquivalent: "d")
+        discoverItem.target = self
+        menu.addItem(discoverItem)
+
         menu.addItem(NSMenuItem.separator())
 
         // Preferences
@@ -153,6 +158,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func reloadShortcuts() {
         appState.shortcutManager.reload()
+    }
+
+    @objc private func discoverMenus() {
+        let executor = ActionExecutor()
+        executor.discoverExcelMenus()
     }
 
     @objc private func openPreferences() {

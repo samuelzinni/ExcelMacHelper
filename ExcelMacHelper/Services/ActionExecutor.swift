@@ -101,12 +101,30 @@ class ActionExecutor {
 
         guard components.count >= 2 else {
             Logger.error("Invalid menu path: \(menuPath)")
-            // Fall back to AppleScript
             executeMenuViaAppleScript(components)
             return
         }
 
-        // Use AppleScript for reliable menu navigation
+        // Apply menu path corrections for Mac Excel compatibility
+        if let correction = correctMenuPath(menuPath) {
+            switch correction {
+            case .keystroke(let combo):
+                Logger.log("Menu path corrected to keystroke: \(menuPath) -> \(combo)")
+                executeKeystroke(combo)
+                return
+            case .correctedPath(let newPath):
+                Logger.log("Menu path corrected: \(menuPath) -> \(newPath)")
+                let newComponents = newPath.components(separatedBy: " > ").map { $0.trimmingCharacters(in: .whitespaces) }
+                executeMenuViaAppleScript(newComponents)
+                return
+            case .unsupported(let reason):
+                Logger.log("Unsupported menu path: \(menuPath) - \(reason)")
+                showUnsupportedNotification(action: menuPath, reason: reason)
+                return
+            }
+        }
+
+        // No correction needed, try the original path
         executeMenuViaAppleScript(components)
     }
 
@@ -163,18 +181,291 @@ class ActionExecutor {
 
     /// Run an AppleScript
     private func runAppleScript(_ script: String) {
-        Logger.debug("Running AppleScript: \(script.prefix(100))...")
+        Logger.debug("Running AppleScript: \(script.prefix(200))...")
 
         DispatchQueue.global(qos: .userInitiated).async {
             var error: NSDictionary?
             if let appleScript = NSAppleScript(source: script) {
                 appleScript.executeAndReturnError(&error)
                 if let error = error {
-                    Logger.error("AppleScript error: \(error)")
+                    let errorMsg = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
+                    Logger.error("AppleScript error: \(errorMsg)")
+                    // Show notification for menu errors so user knows the shortcut failed
+                    DispatchQueue.main.async {
+                        self.showMenuErrorNotification(script: script, error: errorMsg)
+                    }
                 }
             } else {
                 Logger.error("Failed to create NSAppleScript")
             }
+        }
+    }
+
+    // MARK: - Menu Path Corrections for Mac Excel
+
+    /// Result of a menu path correction
+    private enum MenuPathCorrection {
+        case keystroke(String)           // Use a keystroke instead
+        case correctedPath(String)       // Use a different menu path
+        case unsupported(String)         // Not available on Mac, show message
+    }
+
+    /// Correct a menu path for Mac Excel compatibility
+    private func correctMenuPath(_ path: String) -> MenuPathCorrection? {
+        // Pattern 1: "Format > Cells > ..." → Not a real submenu in Mac Excel
+        // Mac Excel has "Format > Cells..." which opens a dialog, not submenus
+        if path.hasPrefix("Format > Cells > ") || path == "Format > Cells" {
+            return .keystroke("Cmd+1")
+        }
+
+        // Pattern 2: "Edit > Paste Special > ..." → Dialog options, not submenu items
+        if path.hasPrefix("Edit > Paste Special > ") {
+            return .keystroke("Cmd+Option+V")
+        }
+
+        // Pattern 3: "Formulas > ..." → No Formulas menu in Mac Excel menubar
+        if path.hasPrefix("Formulas > ") {
+            return correctFormulasPath(path)
+        }
+
+        // Pattern 4: "Review > ..." → No Review menu in Mac Excel menubar
+        if path.hasPrefix("Review > ") {
+            return correctReviewPath(path)
+        }
+
+        // Pattern 5: "Developer > ..." → No Developer menu in Mac Excel menubar
+        if path.hasPrefix("Developer > ") {
+            return correctDeveloperPath(path)
+        }
+
+        // Pattern 6: "File > Page Setup > ..." → Opens a dialog, not submenus
+        if path.hasPrefix("File > Page Setup > ") {
+            return .correctedPath("File > Page Setup")
+        }
+
+        // Pattern 7: "Insert > Chart > ..." → Submenu structure differs
+        if path.hasPrefix("Insert > Chart > ") {
+            return .correctedPath("Insert > Chart")
+        }
+
+        // Exact corrections for specific paths
+        if let correction = Self.exactCorrections[path] {
+            return correction
+        }
+
+        return nil
+    }
+
+    /// Correct "Formulas > ..." paths (Formulas menu doesn't exist in Mac menubar)
+    private func correctFormulasPath(_ path: String) -> MenuPathCorrection {
+        // Function category menus → open Insert Function dialog
+        let functionCategories = ["Financial", "Logical", "Text", "Date & Time",
+                                  "Lookup & Reference", "Math & Trig", "More Functions"]
+        for cat in functionCategories {
+            if path == "Formulas > \(cat)" {
+                return .keystroke("Shift+F3")
+            }
+        }
+
+        // AutoSum variants → use keyboard shortcut for SUM, dialog for others
+        if path.hasPrefix("Formulas > AutoSum") {
+            return .keystroke("Cmd+Shift+T")
+        }
+
+        // Name management
+        if path.contains("Name Manager") || path == "Formulas > Define Name" {
+            return .correctedPath("Insert > Name > Define")
+        }
+
+        // Auditing tools → Tools menu
+        switch path {
+        case "Formulas > Trace Dependents":
+            return .correctedPath("Tools > Trace Dependents")
+        case "Formulas > Trace Precedents":
+            return .correctedPath("Tools > Trace Precedents")
+        case "Formulas > Remove Arrows":
+            return .correctedPath("Tools > Remove All Arrows")
+        case "Formulas > Remove Arrows > Precedent":
+            return .correctedPath("Tools > Remove Precedent Arrows")
+        case "Formulas > Remove Arrows > Dependent":
+            return .correctedPath("Tools > Remove Dependent Arrows")
+        case "Formulas > Error Checking":
+            return .correctedPath("Tools > Error Checking")
+        case "Formulas > Evaluate Formula":
+            return .correctedPath("Tools > Evaluate Formula")
+        case "Formulas > Watch Window":
+            return .correctedPath("Tools > Watch Window")
+        case "Formulas > Calculation Options":
+            return .unsupported("Calculation options are in Excel > Preferences > Calculation")
+        default:
+            return .keystroke("Shift+F3")
+        }
+    }
+
+    /// Correct "Review > ..." paths (Review menu doesn't exist in Mac menubar)
+    private func correctReviewPath(_ path: String) -> MenuPathCorrection {
+        switch path {
+        case "Review > Previous Comment":
+            return .unsupported("Use ribbon Review tab > Previous Comment")
+        case "Review > Next Comment":
+            return .unsupported("Use ribbon Review tab > Next Comment")
+        case "Review > Show All Comments":
+            return .unsupported("Use ribbon Review tab > Show All Comments")
+        case "Review > Allow Edit Ranges":
+            return .correctedPath("Tools > Protection > Allow Users to Edit Ranges")
+        case "Review > Track Changes":
+            return .correctedPath("Tools > Track Changes > Highlight Changes")
+        default:
+            return .unsupported("Review feature not available via menu on Mac")
+        }
+    }
+
+    /// Correct "Developer > ..." paths (Developer menu doesn't exist in Mac menubar)
+    private func correctDeveloperPath(_ path: String) -> MenuPathCorrection {
+        switch path {
+        case "Developer > View Code":
+            return .keystroke("Option+F11")
+        case "Developer > Insert", "Developer > Design Mode", "Developer > Properties":
+            return .unsupported("Developer feature only available via ribbon Developer tab")
+        default:
+            return .unsupported("Developer feature not available via menu on Mac")
+        }
+    }
+
+    /// Exact path corrections for specific menu paths
+    private static let exactCorrections: [String: MenuPathCorrection] = [
+        // Edit menu
+        "Edit > Delete > Entire Column": .correctedPath("Edit > Delete"),
+        "Edit > Delete > Entire Row": .correctedPath("Edit > Delete"),
+        "Edit > Go To > Special": .correctedPath("Edit > Find > Go To Special"),
+        "Edit > Sheet > Move or Copy": .correctedPath("Edit > Sheet > Move or Copy Sheet"),
+
+        // Format menu corrections
+        "Format > Format as Table": .correctedPath("Format > AutoFormat"),
+        "Format > Cell Styles": .correctedPath("Format > Style"),
+        "Format > Merge Across": .keystroke("Cmd+1"),
+        "Format > Unmerge Cells": .keystroke("Cmd+1"),
+
+        // Data menu corrections
+        "Data > Sort Ascending": .correctedPath("Data > Sort"),
+        "Data > Sort Descending": .correctedPath("Data > Sort"),
+        "Data > Clear": .correctedPath("Data > Refresh All"),
+        "Data > Queries & Connections": .correctedPath("Data > Connections"),
+        "Data > Advanced Filter": .correctedPath("Data > Filter > Advanced Filter"),
+        "Data > What-If Analysis": .correctedPath("Data > What-If Analysis"),
+        "Data > What-If Analysis > Goal Seek": .correctedPath("Tools > Goal Seek"),
+        "Data > What-If Analysis > Data Table": .correctedPath("Data > What-If Analysis > Data Table"),
+        "Data > What-If Analysis > Scenario Manager": .correctedPath("Tools > Scenarios"),
+        "Data > Get Data": .correctedPath("Data > Get External Data"),
+        "Data > Subtotals": .correctedPath("Data > Subtotals"),
+
+        // Insert menu corrections
+        "Insert > Photo > Picture from File": .correctedPath("Insert > Picture > Picture from File"),
+        "Insert > Shape": .correctedPath("Insert > Shapes"),
+        "Insert > Sparklines": .unsupported("Sparklines are available via ribbon Insert tab"),
+        "Insert > Recommended Charts": .correctedPath("Insert > Recommended Charts"),
+
+        // View corrections
+        "View > Zoom > Selection": .correctedPath("View > Zoom"),
+
+        // Window corrections
+        "Window > Switch": .unsupported("Use Cmd+` to switch between Excel windows"),
+        "Window > Arrange": .correctedPath("Window > Arrange All"),
+
+        // File corrections
+        "File > Save As > PDF": .correctedPath("File > Save As"),
+        "File > Print Area > Set Print Area": .correctedPath("File > Print Area > Set Print Area"),
+        "File > Print Area > Clear Print Area": .correctedPath("File > Print Area > Clear Print Area"),
+
+        // Tools corrections
+        "Tools > Macro > Security": .correctedPath("Tools > Macro > Macro Security"),
+    ]
+
+    // MARK: - Menu Discovery (for debugging)
+
+    /// Discover and log Mac Excel's actual menu structure
+    /// Call this from the menu bar or preferences to enumerate menus
+    func discoverExcelMenus() {
+        let script = """
+        tell application "System Events"
+            tell process "Microsoft Excel"
+                set menuNames to name of every menu bar item of menu bar 1
+                set result to "MENU BAR ITEMS: " & (menuNames as text)
+
+                repeat with menuName in menuNames
+                    try
+                        set menuItemNames to name of every menu item of menu menuName of menu bar item menuName of menu bar 1
+                        set result to result & "\\n\\n" & menuName & " MENU: " & (menuItemNames as text)
+                    end try
+                end repeat
+
+                return result
+            end tell
+        end tell
+        """
+
+        Logger.log("Discovering Excel menu structure...")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var error: NSDictionary?
+            if let appleScript = NSAppleScript(source: script) {
+                let result = appleScript.executeAndReturnError(&error)
+                if let error = error {
+                    Logger.error("Menu discovery error: \(error)")
+                } else {
+                    let output = result.stringValue ?? "No output"
+                    Logger.log("Excel Menu Structure:\n\(output)")
+                }
+            }
+        }
+    }
+
+    /// Discover submenu items for a specific menu
+    func discoverSubmenu(menuName: String) {
+        let script = """
+        tell application "System Events"
+            tell process "Microsoft Excel"
+                set menuItemNames to name of every menu item of menu "\(menuName)" of menu bar item "\(menuName)" of menu bar 1
+                return menuItemNames as text
+            end tell
+        end tell
+        """
+
+        Logger.log("Discovering \(menuName) menu items...")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var error: NSDictionary?
+            if let appleScript = NSAppleScript(source: script) {
+                let result = appleScript.executeAndReturnError(&error)
+                if let error = error {
+                    Logger.error("Submenu discovery error for \(menuName): \(error)")
+                } else {
+                    let output = result.stringValue ?? "No output"
+                    Logger.log("\(menuName) menu items: \(output)")
+                }
+            }
+        }
+    }
+
+    // MARK: - Notifications
+
+    /// Show a notification when a shortcut is unsupported
+    private func showUnsupportedNotification(action: String, reason: String) {
+        DispatchQueue.main.async {
+            let notification = NSUserNotification()
+            notification.title = "ExcelMacHelper"
+            notification.informativeText = "'\(action)' is not available via menu. \(reason)"
+            notification.soundName = nil
+            NSUserNotificationCenter.default.deliver(notification)
+        }
+        Logger.log("Unsupported shortcut: \(action) - \(reason)")
+    }
+
+    /// Show a notification when a menu action fails
+    private func showMenuErrorNotification(script: String, error: String) {
+        // Extract the menu item name from the script for a friendlier message
+        if error.contains("Can't get menu item") || error.contains("Can't get menu") {
+            Logger.error("Menu navigation failed. The menu path may not exist in Mac Excel. Error: \(error)")
         }
     }
 
