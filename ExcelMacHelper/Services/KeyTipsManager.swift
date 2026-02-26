@@ -19,6 +19,9 @@ class KeyTipsManager: ObservableObject {
     /// Set of known multi-character keys at the current node
     private var multiCharKeys: Set<String> = []
 
+    /// Set of single-character keys at the current node (for fast lookup)
+    private var singleCharKeys: Set<String> = []
+
     /// Set the shortcut tree to use
     func setShortcutTree(_ tree: ShortcutTree) {
         self.shortcutTree = tree
@@ -40,10 +43,10 @@ class KeyTipsManager: ObservableObject {
 
         // Show top-level ribbon tab keys
         availableKeys = tree.getAvailableKeys(after: [])
-        updateMultiCharKeys(at: [])
+        updateKeyLookups(at: [])
         resetTimeout()
 
-        Logger.log("Entered Key Tips mode")
+        Logger.log("Entered Key Tips mode, \(availableKeys.count) keys available")
     }
 
     /// Exit Key Tips mode
@@ -54,6 +57,7 @@ class KeyTipsManager: ObservableObject {
         currentLevel = 0
         keyBuffer = ""
         multiCharKeys = []
+        singleCharKeys = []
         cancelTimeout()
         cancelBufferTimer()
 
@@ -67,52 +71,79 @@ class KeyTipsManager: ObservableObject {
         guard isActive, let tree = shortcutTree else { return false }
 
         resetTimeout()
+        let upperKey = key.uppercased()
 
-        // Append to key buffer
-        let newBuffer = keyBuffer + key.uppercased()
-
-        // Check if the buffer matches an exact child key
+        // Get current node in the tree
         let currentNode = currentSequence.isEmpty ? tree.root : tree.lookup(keys: currentSequence)
         guard let node = currentNode else {
+            Logger.log("Current node not found for sequence \(currentSequence), exiting")
             exitKeyTipsMode()
             return false
         }
 
-        // Check if newBuffer exactly matches a child key
+        // Build the new buffer by appending this key
+        let newBuffer = keyBuffer + upperKey
+
+        // PRIORITY 1: Check if newBuffer exactly matches a child key
         if node.children[newBuffer] != nil {
             cancelBufferTimer()
             keyBuffer = ""
+            Logger.log("Exact match for '\(newBuffer)' in sequence \(currentSequence)")
             return advanceSequence(with: newBuffer)
         }
 
-        // Check if newBuffer is a prefix of any multi-char key
+        // PRIORITY 2: Check if newBuffer is a prefix of any multi-char key
         let isPrefixOfMultiChar = multiCharKeys.contains { $0.hasPrefix(newBuffer) && $0 != newBuffer }
 
         if isPrefixOfMultiChar {
-            // Buffer is a prefix of a multi-char key - wait for more input
+            // Buffer might grow into a multi-char key - wait for more input
             keyBuffer = newBuffer
-
-            // Also check if the single key is a valid child (ambiguous case)
-            // Use a short timer to resolve ambiguity
             cancelBufferTimer()
-            bufferTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
-                DispatchQueue.main.async {
+
+            // If the single key alone is also a valid child, use a short timer
+            // to disambiguate (e.g., "F" alone vs "FP", "FF")
+            if singleCharKeys.contains(upperKey) && keyBuffer == upperKey {
+                bufferTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
+                    self?.resolveBuffer()
+                }
+            } else {
+                // No ambiguity with a single key, just wait for the next char
+                bufferTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in
                     self?.resolveBuffer()
                 }
             }
+
+            Logger.log("Buffering '\(newBuffer)', waiting for more input")
             return true
         }
 
-        // If the single key matches a child, use it
-        let singleKey = key.uppercased()
-        if node.children[singleKey] != nil {
+        // PRIORITY 3: No multi-char prefix match. Try the single key directly.
+        if node.children[upperKey] != nil {
             cancelBufferTimer()
             keyBuffer = ""
-            return advanceSequence(with: singleKey)
+            Logger.log("Single key match for '\(upperKey)' in sequence \(currentSequence)")
+            return advanceSequence(with: upperKey)
         }
 
-        // No match found - exit
-        Logger.log("No match for key '\(key)' in sequence \(currentSequence)")
+        // PRIORITY 4: If we had a pending buffer and neither combined nor single matched,
+        // try resolving the buffer first, then handle the new key
+        if !keyBuffer.isEmpty {
+            let savedBuffer = keyBuffer
+            cancelBufferTimer()
+            keyBuffer = ""
+
+            // Try to advance with the first character of the old buffer
+            let firstChar = String(savedBuffer.prefix(1))
+            if node.children[firstChar] != nil {
+                Logger.log("Resolving buffer: advancing with '\(firstChar)', replaying '\(upperKey)'")
+                _ = advanceSequence(with: firstChar)
+                // Replay the current key in the new context
+                return processKey(key)
+            }
+        }
+
+        // No match found - exit Key Tips mode
+        Logger.log("No match for key '\(upperKey)' in sequence \(currentSequence)")
         exitKeyTipsMode()
         return false
     }
@@ -131,6 +162,7 @@ class KeyTipsManager: ObservableObject {
         if node.children[keyBuffer] != nil {
             let buf = keyBuffer
             keyBuffer = ""
+            Logger.log("Buffer resolved: advancing with '\(buf)'")
             _ = advanceSequence(with: buf)
             return
         }
@@ -139,11 +171,13 @@ class KeyTipsManager: ObservableObject {
         let firstChar = String(keyBuffer.prefix(1))
         if node.children[firstChar] != nil {
             keyBuffer = ""
+            Logger.log("Buffer resolved: advancing with first char '\(firstChar)'")
             _ = advanceSequence(with: firstChar)
             return
         }
 
         // Nothing matches
+        Logger.log("Buffer '\(keyBuffer)' could not be resolved, exiting")
         exitKeyTipsMode()
     }
 
@@ -156,20 +190,14 @@ class KeyTipsManager: ObservableObject {
 
         guard let node = tree.lookup(keys: currentSequence) else {
             // This shouldn't happen since we checked for the child
+            Logger.error("Node not found after advancing to \(currentSequence)")
             exitKeyTipsMode()
             return true
         }
 
         // If this node has an action and no children, execute it
         if node.isLeaf {
-            executeAction(node.shortcut!)
-            return true
-        }
-
-        // If this node has an action AND children, and we're past level 2,
-        // we need to decide: Mac Excel handles up to 2 levels natively.
-        // After level 2, we intercept and execute.
-        if node.hasAction && currentLevel >= 2 && node.children.isEmpty {
+            Logger.log("Leaf node reached: executing '\(node.shortcut!.action)'")
             executeAction(node.shortcut!)
             return true
         }
@@ -177,12 +205,15 @@ class KeyTipsManager: ObservableObject {
         // If this node has children, show them and wait for next key
         if !node.children.isEmpty {
             availableKeys = node.childLabels
-            updateMultiCharKeys(at: currentSequence)
-            Logger.log("Key Tips: sequence=\(currentSequence), available=\(node.availableKeys)")
+            updateKeyLookups(at: currentSequence)
+            Logger.log("Key Tips: sequence=\(currentSequence), \(node.children.count) children available")
+
+            // If the node also has an action (intermediate node with action),
+            // we still show children. The user needs to go deeper or wait.
             return true
         }
 
-        // Node has action but we got here somehow
+        // Node has action but no children (shouldn't reach here due to isLeaf check above)
         if let shortcut = node.shortcut {
             executeAction(shortcut)
             return true
@@ -194,7 +225,7 @@ class KeyTipsManager: ObservableObject {
 
     /// Execute a shortcut action
     private func executeAction(_ shortcut: ParsedShortcut) {
-        Logger.log("Executing shortcut: \(shortcut.action)")
+        Logger.log("Executing shortcut: \(shortcut.action) (\(shortcut.macEquivalent))")
         exitKeyTipsMode()
 
         // Small delay to ensure Key Tips mode cleanup happens first
@@ -203,17 +234,23 @@ class KeyTipsManager: ObservableObject {
         }
     }
 
-    // MARK: - Multi-Character Key Detection
+    // MARK: - Key Lookup Helpers
 
-    /// Update the set of multi-character keys at the current position
-    private func updateMultiCharKeys(at sequence: [String]) {
+    /// Update the sets of multi-character and single-character keys at the current position
+    private func updateKeyLookups(at sequence: [String]) {
         guard let tree = shortcutTree else {
             multiCharKeys = []
+            singleCharKeys = []
             return
         }
 
         let node = sequence.isEmpty ? tree.root : tree.lookup(keys: sequence)
-        multiCharKeys = Set(node?.children.keys.filter { $0.count > 1 } ?? [])
+        let childKeys = node?.children.keys ?? Dictionary<String, ShortcutTreeNode>.Keys()
+
+        multiCharKeys = Set(childKeys.filter { $0.count > 1 })
+        singleCharKeys = Set(childKeys.filter { $0.count == 1 })
+
+        Logger.debug("Updated key lookups: \(singleCharKeys.count) single, \(multiCharKeys.count) multi")
     }
 
     // MARK: - Timeout
@@ -222,10 +259,8 @@ class KeyTipsManager: ObservableObject {
     private func resetTimeout() {
         cancelTimeout()
         timeoutTimer = Timer.scheduledTimer(withTimeInterval: Constants.keyTipsTimeoutInterval, repeats: false) { [weak self] _ in
-            DispatchQueue.main.async {
-                Logger.log("Key Tips timed out")
-                self?.exitKeyTipsMode()
-            }
+            Logger.log("Key Tips timed out")
+            self?.exitKeyTipsMode()
         }
     }
 

@@ -24,11 +24,9 @@ class EventTapManager: ObservableObject {
     private static let functionKeyCodes: Set<CGKeyCode> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
 
     // NX media key type to F-key virtual keycode mapping (standard MacBook layout)
-    // These map the physical F-key positions to their virtual keycodes
     private static let mediaKeyToFKey: [Int: CGKeyCode] = [
         3: 122,   // Brightness Down → F1
         2: 120,   // Brightness Up → F2
-        // F3/F4 are typically Mission Control/Spotlight, handled differently by macOS
         22: 96,   // Keyboard Brightness Down / Dictation → F5
         21: 97,   // Keyboard Brightness Up / Do Not Disturb → F6
         18: 98,   // Previous Track → F7
@@ -208,11 +206,9 @@ class EventTapManager: ObservableObject {
                     // Already in Key Tips mode, ignore
                     return event
                 }
-                // Check if Option was pressed and released without other keys
-                // This is the trigger for Key Tips mode
-                DispatchQueue.main.async {
-                    self.onOptionKeyReleased?()
-                }
+                // Enter Key Tips mode synchronously so that subsequent key events
+                // in the same RunLoop cycle see the updated state immediately.
+                self.onOptionKeyReleased?()
                 return event
             }
         }
@@ -225,9 +221,7 @@ class EventTapManager: ObservableObject {
         // Escape key
         if keyCode == 53 {
             if isInKeyTipsMode?() == true {
-                DispatchQueue.main.async {
-                    self.onEscapePressed?()
-                }
+                self.onEscapePressed?()
                 return nil // Consume the escape key
             }
             return event
@@ -245,26 +239,28 @@ class EventTapManager: ObservableObject {
         }
 
         // Convert keycode to character
-        guard let keyChar = keyCharacter(for: keyCode, shift: flags.contains(.maskShift)) else {
+        guard let keyChar = keyCharacter(for: keyCode) else {
             return event
         }
 
         // Send to Key Tips handler
-        let consumed = onKeyPressed?(keyChar.uppercased(), flags) ?? false
+        let consumed = onKeyPressed?(keyChar, flags) ?? false
 
         return consumed ? nil : event
     }
 
     /// Convert a key code to a character string
-    private func keyCharacter(for keyCode: CGKeyCode, shift: Bool) -> String? {
+    private func keyCharacter(for keyCode: CGKeyCode) -> String? {
         let keyMapping: [CGKeyCode: String] = [
+            // Letters
             0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G",
             6: "Z", 7: "X", 8: "C", 9: "V", 11: "B", 12: "Q",
-            13: "W", 14: "E", 15: "R", 16: "Y", 17: "T", 18: "1",
-            19: "2", 20: "3", 21: "4", 22: "6", 23: "5", 24: "=",
-            25: "9", 26: "7", 27: "-", 28: "8", 29: "0", 31: "O",
-            32: "U", 34: "I", 35: "P", 37: "L", 38: "J", 40: "K",
-            45: "N", 46: "M",
+            13: "W", 14: "E", 15: "R", 16: "Y", 17: "T",
+            31: "O", 32: "U", 34: "I", 35: "P", 37: "L",
+            38: "J", 40: "K", 45: "N", 46: "M",
+            // Numbers
+            18: "1", 19: "2", 20: "3", 21: "4", 23: "5",
+            22: "6", 26: "7", 28: "8", 25: "9", 29: "0",
         ]
         return keyMapping[keyCode]
     }

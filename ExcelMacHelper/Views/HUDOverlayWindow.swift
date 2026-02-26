@@ -55,8 +55,13 @@ class HUDOverlayWindow {
         let hostingView = NSHostingView(rootView: contentView)
         let fittingSize = hostingView.fittingSize
 
+        // Cap width to avoid overflowing the screen
+        let screen = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let maxWidth = min(fittingSize.width, screen.width - 40)
+        let cappedSize = NSSize(width: max(maxWidth, 200), height: max(fittingSize.height, 30))
+
         // Position relative to the Excel window
-        let overlayFrame = calculateOverlayFrame(contentSize: fittingSize, level: level)
+        let overlayFrame = calculateOverlayFrame(contentSize: cappedSize, level: level)
 
         window.contentView?.subviews.forEach { $0.removeFromSuperview() }
         hostingView.frame = NSRect(origin: .zero, size: overlayFrame.size)
@@ -89,11 +94,11 @@ class HUDOverlayWindow {
         if let excelFrame = getExcelWindowFrame() {
             let screenHeight = NSScreen.main?.frame.height ?? 900
 
-            // AX coordinates use top-left origin; convert to AppKit bottom-left origin
-            // Position over the ribbon area of the Excel window
+            // Window frame is in CG coordinates (top-left origin)
+            // Convert to AppKit bottom-left origin for NSWindow positioning
             let ribbonOffsetFromTop: CGFloat = level == 0 ? 52 : 85
-            let axOverlayTop = excelFrame.origin.y + ribbonOffsetFromTop
-            let appKitY = screenHeight - axOverlayTop - contentSize.height
+            let topOfOverlay = excelFrame.origin.y + ribbonOffsetFromTop
+            let appKitY = screenHeight - topOfOverlay - contentSize.height
 
             // Center horizontally within the Excel window
             let x = excelFrame.origin.x + (excelFrame.size.width - contentSize.width) / 2
@@ -101,8 +106,8 @@ class HUDOverlayWindow {
             return NSRect(
                 x: x,
                 y: appKitY,
-                width: max(contentSize.width, 200),
-                height: max(contentSize.height, 30)
+                width: contentSize.width,
+                height: contentSize.height
             )
         }
 
@@ -111,40 +116,39 @@ class HUDOverlayWindow {
         return NSRect(
             x: screen.origin.x + (screen.width - contentSize.width) / 2,
             y: screen.origin.y + screen.height - contentSize.height - 80,
-            width: max(contentSize.width, 200),
-            height: max(contentSize.height, 30)
+            width: contentSize.width,
+            height: contentSize.height
         )
     }
 
-    /// Get the Excel window frame using the Accessibility API (AX coordinates: top-left origin)
-    private func getExcelWindowFrame() -> NSRect? {
-        guard let excelApp = NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.microsoft.Excel"
-        ).first else { return nil }
-
-        let appElement = AXUIElementCreateApplication(excelApp.processIdentifier)
-
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windows = windowsRef as? [AXUIElement],
-              let mainWindow = windows.first else {
+    /// Get the Excel window frame using CGWindowList (CG coordinates: top-left origin)
+    private func getExcelWindowFrame() -> CGRect? {
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
             return nil
         }
 
-        var positionRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
+        for window in windowList {
+            guard let ownerName = window[kCGWindowOwnerName as String] as? String,
+                  ownerName == "Microsoft Excel",
+                  let layer = window[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let bounds = window[kCGWindowBounds as String] as? NSDictionary else {
+                continue
+            }
 
-        guard AXUIElementCopyAttributeValue(mainWindow, kAXPositionAttribute as CFString, &positionRef) == .success,
-              AXUIElementCopyAttributeValue(mainWindow, kAXSizeAttribute as CFString, &sizeRef) == .success else {
-            return nil
+            var rect = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(bounds, &rect) else { continue }
+
+            // Skip tiny windows (toolbars, popovers)
+            if rect.width > 200 && rect.height > 200 {
+                return rect
+            }
         }
 
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        AXValueGetValue(positionRef as! AXValue, .cgPoint, &position)
-        AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
-
-        return NSRect(origin: position, size: size)
+        return nil
     }
 }
 
@@ -162,11 +166,11 @@ struct KeyTipsBadgeView: View {
                 HStack(spacing: 3) {
                     Text("Alt")
                         .font(.system(size: 10, weight: .semibold))
-                    ForEach(Array(sequence.enumerated()), id: \.offset) { _, key in
+                    ForEach(0..<sequence.count, id: \.self) { i in
                         Text(">")
                             .font(.system(size: 9))
                             .foregroundColor(Color.white.opacity(0.6))
-                        Text(key)
+                        Text(sequence[i])
                             .font(.system(size: 10, weight: .bold))
                     }
                 }
@@ -179,25 +183,32 @@ struct KeyTipsBadgeView: View {
                 )
             }
 
-            // Key badges in a horizontal flow
-            FlowLayoutView(keys: keys)
-        }
-        .padding(6)
-    }
-}
-
-// MARK: - Flow Layout for Badges
-
-/// Horizontal flow layout that wraps badges to the next line when needed
-struct FlowLayoutView: View {
-    let keys: [(key: String, label: String)]
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ForEach(keys, id: \.key) { item in
-                KeyTipBadge(key: item.key, label: item.label)
+            // Key badges in a grid (wraps for large key sets)
+            let columns = gridColumns(for: keys.count)
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 4) {
+                ForEach(0..<keys.count, id: \.self) { i in
+                    KeyTipBadge(key: keys[i].key, label: keys[i].label)
+                }
             }
         }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.black.opacity(0.75))
+        )
+    }
+
+    private func gridColumns(for count: Int) -> [GridItem] {
+        // Use fewer columns for small sets, more for large
+        let cols: Int
+        if count <= 6 {
+            cols = count
+        } else if count <= 12 {
+            cols = min(count, 8)
+        } else {
+            cols = min(count, 12)
+        }
+        return Array(repeating: GridItem(.flexible(minimum: 40), spacing: 6), count: max(cols, 1))
     }
 }
 
