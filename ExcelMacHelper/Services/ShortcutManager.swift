@@ -9,7 +9,7 @@ class ShortcutManager: ObservableObject {
     /// Initialize and load shortcuts
     func initialize() {
         ensureAppSupportDirectory()
-        copyBundledShortcutsIfNeeded()
+        updateBundledShortcutsIfNewer()
         loadShortcuts()
     }
 
@@ -26,26 +26,33 @@ class ShortcutManager: ObservableObject {
         }
     }
 
-    /// Copy bundled shortcuts JSON to Application Support on first launch
-    private func copyBundledShortcutsIfNeeded() {
-        let destination = shortcutsFilePath()
-
-        // Only copy if the file doesn't already exist
-        if FileManager.default.fileExists(atPath: destination.path) {
-            Logger.log("Shortcuts file already exists at \(destination.path)")
+    /// Copy bundled shortcuts to Application Support, replacing older versions.
+    /// The bundled copy is always authoritative unless the user has set a custom path.
+    private func updateBundledShortcutsIfNewer() {
+        // If a custom path is set, don't overwrite anything
+        if let customPath = UserDefaults.standard.string(forKey: Constants.shortcutsFilePathKey),
+           !customPath.isEmpty {
+            Logger.log("Custom shortcuts path set, skipping bundle update")
             return
         }
+
+        let destination = Constants.shortcutsFilePath
 
         guard let bundledURL = Bundle.main.url(forResource: Constants.bundledShortcutsFileName, withExtension: "json") else {
             Logger.error("Bundled shortcuts file not found in app bundle")
             return
         }
 
+        // Always overwrite the Application Support copy with the latest bundle version.
+        // This ensures shortcut updates in new builds take effect immediately.
         do {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
             try FileManager.default.copyItem(at: bundledURL, to: destination)
-            Logger.log("Copied bundled shortcuts to \(destination.path)")
+            Logger.log("Updated shortcuts from bundle to \(destination.path)")
         } catch {
-            Logger.error("Failed to copy bundled shortcuts: \(error)")
+            Logger.error("Failed to update shortcuts from bundle: \(error)")
         }
     }
 

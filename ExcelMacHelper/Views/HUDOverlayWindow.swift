@@ -1,12 +1,12 @@
 import Cocoa
 import SwiftUI
 
-/// Windows-style Key Tips overlay that shows badges on the Excel ribbon area.
-/// Level 0 (tab keys): Individual floating badges positioned across the ribbon tab bar.
-/// Level 1+ (sub-keys): Compact grid positioned below the ribbon area.
+/// Windows-style Key Tips overlay that shows available shortcut keys.
+/// Displays as a compact panel below the Excel ribbon area for all levels.
 class HUDOverlayWindow {
     private var window: NSWindow?
     private var appState: AppState
+    private var hostingView: NSHostingView<KeyTipsPanelView>?
 
     init(appState: AppState) {
         self.appState = appState
@@ -19,25 +19,16 @@ class HUDOverlayWindow {
         }
         updateContent()
 
-        let wasHidden = window?.alphaValue == 0 || !(window?.isVisible ?? false)
+        // Cancel any in-progress hide animation
+        window?.animator().alphaValue = 1.0
         window?.orderFrontRegardless()
-
-        if wasHidden {
-            // Only animate in when the window was previously hidden,
-            // not when transitioning between levels (which just updates content)
-            window?.alphaValue = 0
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.12
-                window?.animator().alphaValue = 1.0
-            }
-        }
     }
 
     /// Hide the Key Tips overlay
     func hide() {
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.1
-            window?.animator().alphaValue = 0
+            self.window?.animator().alphaValue = 0
         }, completionHandler: {
             self.window?.orderOut(nil)
         })
@@ -49,59 +40,38 @@ class HUDOverlayWindow {
 
         let keys = appState.keyTipsManager.availableKeys
         let sequence = appState.keyTipsManager.currentSequence
-        let level = appState.keyTipsManager.currentLevel
 
         guard !keys.isEmpty else { return }
 
         let excelFrame = getExcelWindowFrame()
 
-        if level == 0 {
-            // Level 0: Individual floating badges across the ribbon tab bar
-            let contentView = RibbonTabKeyTipsView(
-                keys: keys,
-                ribbonWidth: excelFrame?.width ?? 1200
-            )
-            let hostingView = NSHostingView(rootView: contentView)
+        let contentView = KeyTipsPanelView(
+            keys: keys,
+            sequence: sequence
+        )
 
-            // Size the window to span the ribbon area
-            let ribbonWidth = excelFrame?.width ?? 1200
-            let contentHeight: CGFloat = 28
-            let contentSize = NSSize(width: ribbonWidth, height: contentHeight)
-
-            let overlayFrame = calculateRibbonOverlayFrame(
-                contentSize: contentSize,
-                excelFrame: excelFrame
-            )
-
-            window.contentView?.subviews.forEach { $0.removeFromSuperview() }
-            hostingView.frame = NSRect(origin: .zero, size: overlayFrame.size)
-            hostingView.autoresizingMask = [.width, .height]
-            window.contentView?.addSubview(hostingView)
-            window.setFrame(overlayFrame, display: true)
+        // Reuse existing hosting view to avoid visual flash on level transitions
+        if let existing = hostingView {
+            existing.rootView = contentView
         } else {
-            // Level 1+: Compact grid below the ribbon area
-            let contentView = SubLevelKeyTipsView(
-                keys: keys,
-                sequence: sequence
-            )
-            let hostingView = NSHostingView(rootView: contentView)
-            let fittingSize = hostingView.fittingSize
-
-            let screen = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-            let maxWidth = min(fittingSize.width, screen.width - 40)
-            let cappedSize = NSSize(width: max(maxWidth, 200), height: max(fittingSize.height, 30))
-
-            let overlayFrame = calculateSubLevelOverlayFrame(
-                contentSize: cappedSize,
-                excelFrame: excelFrame
-            )
-
-            window.contentView?.subviews.forEach { $0.removeFromSuperview() }
-            hostingView.frame = NSRect(origin: .zero, size: overlayFrame.size)
-            hostingView.autoresizingMask = [.width, .height]
-            window.contentView?.addSubview(hostingView)
-            window.setFrame(overlayFrame, display: true)
+            let hv = NSHostingView(rootView: contentView)
+            hv.autoresizingMask = [.width, .height]
+            window.contentView?.addSubview(hv)
+            hostingView = hv
         }
+
+        let fittingSize = hostingView!.fittingSize
+        let screen = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let maxWidth = min(fittingSize.width, screen.width - 40)
+        let cappedSize = NSSize(width: max(maxWidth, 200), height: max(fittingSize.height, 30))
+
+        let overlayFrame = calculateOverlayFrame(
+            contentSize: cappedSize,
+            excelFrame: excelFrame
+        )
+
+        hostingView!.frame = NSRect(origin: .zero, size: overlayFrame.size)
+        window.setFrame(overlayFrame, display: true)
     }
 
     private func createWindow() {
@@ -123,40 +93,13 @@ class HUDOverlayWindow {
         self.window = window
     }
 
-    // MARK: - Frame Calculations
+    // MARK: - Frame Calculation
 
-    /// Calculate overlay frame for Level 0: positioned over the ribbon tab bar
-    private func calculateRibbonOverlayFrame(contentSize: NSSize, excelFrame: CGRect?) -> NSRect {
+    /// Calculate overlay frame: centered horizontally below the ribbon area
+    private func calculateOverlayFrame(contentSize: NSSize, excelFrame: CGRect?) -> NSRect {
         if let excelFrame = excelFrame {
             let screenHeight = NSScreen.main?.frame.height ?? 900
-            // Ribbon tab bar is approximately 48-55px from the top of the Excel window
-            let ribbonTabOffset: CGFloat = 52
-            let topOfOverlay = excelFrame.origin.y + ribbonTabOffset
-            let appKitY = screenHeight - topOfOverlay - contentSize.height
-
-            return NSRect(
-                x: excelFrame.origin.x,
-                y: appKitY,
-                width: contentSize.width,
-                height: contentSize.height
-            )
-        }
-
-        // Fallback: top of screen
-        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        return NSRect(
-            x: screen.origin.x,
-            y: screen.origin.y + screen.height - contentSize.height - 55,
-            width: contentSize.width,
-            height: contentSize.height
-        )
-    }
-
-    /// Calculate overlay frame for Level 1+: positioned below the ribbon area
-    private func calculateSubLevelOverlayFrame(contentSize: NSSize, excelFrame: CGRect?) -> NSRect {
-        if let excelFrame = excelFrame {
-            let screenHeight = NSScreen.main?.frame.height ?? 900
-            // Sub-level content appears just below the ribbon (approximately 85-95px from top)
+            // Position just below the ribbon (approximately 85-95px from top of Excel window)
             let ribbonBottomOffset: CGFloat = 90
             let topOfOverlay = excelFrame.origin.y + ribbonBottomOffset
             let appKitY = screenHeight - topOfOverlay - contentSize.height
@@ -213,65 +156,19 @@ class HUDOverlayWindow {
     }
 }
 
-// MARK: - Level 0: Ribbon Tab Key Tips (floating badges across the tab bar)
+// MARK: - Key Tips Panel View (used for all levels)
 
-struct RibbonTabKeyTipsView: View {
-    let keys: [(key: String, label: String)]
-    let ribbonWidth: CGFloat
-
-    // Fixed pixel positions (in points) from the left edge of the Excel window.
-    // Unlike fractional positions, these don't drift apart as the window gets wider,
-    // matching the actual ribbon tab labels which stay at fixed positions.
-    private static let tabPositions: [String: CGFloat] = [
-        "F": 46,     // File
-        "H": 100,    // Home
-        "N": 160,    // Insert
-        "P": 280,    // Page Layout
-        "M": 370,    // Formulas
-        "A": 435,    // Data
-        "R": 500,    // Review
-        "W": 555,    // View
-        "L": 630,    // Developer
-        "Q": 710,    // Search / Tell Me
-    ]
-
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .topLeading) {
-                // Position each badge at its approximate tab location
-                ForEach(0..<keys.count, id: \.self) { i in
-                    let key = keys[i].key
-                    let x = Self.tabPositions[key] ?? fallbackPosition(for: i)
-
-                    FloatingKeyBadge(key: key)
-                        .position(x: x, y: geometry.size.height / 2)
-                }
-            }
-        }
-    }
-
-    /// Fallback position for keys not in the tab position map
-    private func fallbackPosition(for index: Int) -> CGFloat {
-        // Space legacy keys (E, O, D, I, T) after the main tabs
-        let baseOffset: CGFloat = 750
-        let spacing: CGFloat = 55
-        return baseOffset + CGFloat(index) * spacing
-    }
-}
-
-// MARK: - Level 1+: Sub-Level Key Tips (compact grid below ribbon)
-
-struct SubLevelKeyTipsView: View {
+struct KeyTipsPanelView: View {
     let keys: [(key: String, label: String)]
     let sequence: [String]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             // Sequence breadcrumb
-            if !sequence.isEmpty {
-                HStack(spacing: 3) {
-                    Text("Alt")
-                        .font(.system(size: 10, weight: .semibold))
+            HStack(spacing: 3) {
+                Text("Alt")
+                    .font(.system(size: 10, weight: .semibold))
+                if !sequence.isEmpty {
                     ForEach(0..<sequence.count, id: \.self) { i in
                         Text(">")
                             .font(.system(size: 9))
@@ -280,14 +177,14 @@ struct SubLevelKeyTipsView: View {
                             .font(.system(size: 10, weight: .bold))
                     }
                 }
-                .foregroundColor(.white)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color(red: 0.2, green: 0.2, blue: 0.2).opacity(0.85))
-                )
             }
+            .foregroundColor(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color(red: 0.2, green: 0.2, blue: 0.2).opacity(0.85))
+            )
 
             // Key badges in a compact grid
             let columns = gridColumns(for: keys.count)
@@ -318,30 +215,7 @@ struct SubLevelKeyTipsView: View {
     }
 }
 
-// MARK: - Floating Key Tip Badge (Windows-style, no background panel)
-
-struct FloatingKeyBadge: View {
-    let key: String
-
-    var body: some View {
-        Text(key)
-            .font(.system(size: 11, weight: .bold))
-            .foregroundColor(.white)
-            .frame(minWidth: 22, minHeight: 20)
-            .padding(.horizontal, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color(red: 0.2, green: 0.2, blue: 0.2).opacity(0.85))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 3)
-                    .stroke(Color(white: 0.5), lineWidth: 0.5)
-            )
-            .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
-    }
-}
-
-// MARK: - Key Tip Badge with Label (for sub-level display)
+// MARK: - Key Tip Badge with Label
 
 struct KeyTipBadgeWithLabel: View {
     let key: String
