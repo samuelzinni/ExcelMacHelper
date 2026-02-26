@@ -52,19 +52,39 @@ class EventTapManager: ObservableObject {
             return
         }
 
-        let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
+        // Try with NX_SYSDEFINED (type 14) for media key interception
+        let fullEventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.keyUp.rawValue)
             | (1 << CGEventType.flagsChanged.rawValue)
             | (1 << 14)  // NX_SYSDEFINED: captures media key events for F-key remapping
 
-        guard let tap = CGEvent.tapCreate(
+        // Fallback mask without NX_SYSDEFINED (in case it causes tap creation to fail)
+        let basicEventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.keyUp.rawValue)
+            | (1 << CGEventType.flagsChanged.rawValue)
+
+        let tap: CFMachPort
+        if let fullTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
-            eventsOfInterest: eventMask,
+            eventsOfInterest: fullEventMask,
             callback: eventTapCallback,
             userInfo: nil
-        ) else {
+        ) {
+            tap = fullTap
+            Logger.log("Event tap created with media key support")
+        } else if let basicTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: basicEventMask,
+            callback: eventTapCallback,
+            userInfo: nil
+        ) {
+            tap = basicTap
+            Logger.log("Event tap created without media key support (fallback)")
+        } else {
             Logger.error("Failed to create event tap. Ensure Accessibility permissions are granted.")
             return
         }
@@ -206,9 +226,12 @@ class EventTapManager: ObservableObject {
                     // Already in Key Tips mode, ignore
                     return event
                 }
-                // Enter Key Tips mode synchronously so that subsequent key events
-                // in the same RunLoop cycle see the updated state immediately.
-                self.onOptionKeyReleased?()
+                // Dispatch async to avoid RunLoop reentrancy issues -
+                // modifying @Published properties from within the event tap
+                // callback can trigger UI updates that crash the tap.
+                DispatchQueue.main.async {
+                    self.onOptionKeyReleased?()
+                }
                 return event
             }
         }
@@ -221,7 +244,9 @@ class EventTapManager: ObservableObject {
         // Escape key
         if keyCode == 53 {
             if isInKeyTipsMode?() == true {
-                self.onEscapePressed?()
+                DispatchQueue.main.async {
+                    self.onEscapePressed?()
+                }
                 return nil // Consume the escape key
             }
             return event
