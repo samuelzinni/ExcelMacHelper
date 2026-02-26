@@ -18,13 +18,18 @@ class HUDOverlayWindow {
             createWindow()
         }
         updateContent()
+
+        let wasHidden = window?.alphaValue == 0 || !(window?.isVisible ?? false)
         window?.orderFrontRegardless()
 
-        // Animate in
-        window?.alphaValue = 0
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            window?.animator().alphaValue = 1.0
+        if wasHidden {
+            // Only animate in when the window was previously hidden,
+            // not when transitioning between levels (which just updates content)
+            window?.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                window?.animator().alphaValue = 1.0
+            }
         }
     }
 
@@ -214,20 +219,20 @@ struct RibbonTabKeyTipsView: View {
     let keys: [(key: String, label: String)]
     let ribbonWidth: CGFloat
 
-    // Approximate horizontal positions of ribbon tab names as fractions of the ribbon width.
-    // These correspond to where the tab names (File, Home, Insert, etc.) appear in the ribbon.
-    // Positions are approximate and work well for standard Excel window widths.
+    // Fixed pixel positions (in points) from the left edge of the Excel window.
+    // Unlike fractional positions, these don't drift apart as the window gets wider,
+    // matching the actual ribbon tab labels which stay at fixed positions.
     private static let tabPositions: [String: CGFloat] = [
-        "F": 0.03,   // File
-        "H": 0.09,   // Home
-        "N": 0.16,   // Insert
-        "P": 0.25,   // Page Layout
-        "M": 0.35,   // Formulas
-        "A": 0.43,   // Data
-        "R": 0.50,   // Review
-        "W": 0.56,   // View
-        "L": 0.64,   // Developer
-        "Q": 0.72,   // Tell Me / Search
+        "F": 46,     // File
+        "H": 100,    // Home
+        "N": 160,    // Insert
+        "P": 280,    // Page Layout
+        "M": 370,    // Formulas
+        "A": 435,    // Data
+        "R": 500,    // Review
+        "W": 555,    // View
+        "L": 630,    // Developer
+        "Q": 710,    // Search / Tell Me
     ]
 
     var body: some View {
@@ -236,11 +241,10 @@ struct RibbonTabKeyTipsView: View {
                 // Position each badge at its approximate tab location
                 ForEach(0..<keys.count, id: \.self) { i in
                     let key = keys[i].key
-                    let xFraction = Self.tabPositions[key] ?? fallbackPosition(for: i)
-                    let x = geometry.size.width * xFraction
+                    let x = Self.tabPositions[key] ?? fallbackPosition(for: i)
 
                     FloatingKeyBadge(key: key)
-                        .position(x: x + 14, y: geometry.size.height / 2)
+                        .position(x: x, y: geometry.size.height / 2)
                 }
             }
         }
@@ -249,8 +253,8 @@ struct RibbonTabKeyTipsView: View {
     /// Fallback position for keys not in the tab position map
     private func fallbackPosition(for index: Int) -> CGFloat {
         // Space legacy keys (E, O, D, I, T) after the main tabs
-        let baseOffset: CGFloat = 0.78
-        let spacing: CGFloat = 0.05
+        let baseOffset: CGFloat = 750
+        let spacing: CGFloat = 55
         return baseOffset + CGFloat(index) * spacing
     }
 }

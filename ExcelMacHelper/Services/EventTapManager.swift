@@ -278,17 +278,16 @@ class EventTapManager: ObservableObject {
                 // Option key pressed - don't enter Key Tips mode yet, wait for release
                 return event
             } else {
-                // Option key released
+                // Option key released - activate Key Tips immediately so the
+                // next keystroke (which arrives as a separate event) sees
+                // isActive=true and gets intercepted. The heavy UI work
+                // (show overlay) still happens asynchronously via Combine
+                // observers that use receive(on: DispatchQueue.main).
                 if isInKeyTipsMode?() == true {
                     // Already in Key Tips mode, ignore
                     return event
                 }
-                // Dispatch async to avoid RunLoop reentrancy issues -
-                // modifying @Published properties from within the event tap
-                // callback can trigger UI updates that crash the tap.
-                DispatchQueue.main.async {
-                    self.onOptionKeyReleased?()
-                }
+                self.onOptionKeyReleased?()
                 return event
             }
         }

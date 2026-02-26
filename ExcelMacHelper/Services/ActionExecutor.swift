@@ -169,6 +169,13 @@ class ActionExecutor {
 
     /// Execute an AppleScript command string
     private func executeAppleScript(_ scriptString: String) {
+        // Handle "mso:CommandId" for ribbon commands via VBA ExecuteMso
+        if scriptString.hasPrefix("mso:") {
+            let msoId = String(scriptString.dropFirst("mso:".count)).trimmingCharacters(in: .whitespaces)
+            executeMsoCommand(msoId)
+            return
+        }
+
         // If it looks like a menu path, use menu navigation
         if scriptString.contains(" > ") {
             let components = scriptString.components(separatedBy: " > ").map { $0.trimmingCharacters(in: .whitespaces) }
@@ -177,6 +184,20 @@ class ActionExecutor {
         }
 
         runAppleScript(scriptString)
+    }
+
+    /// Execute an Excel ribbon command via VBA's CommandBars.ExecuteMso.
+    /// This triggers the actual ribbon button (e.g., fill color picker, decrease decimal)
+    /// rather than a generic fallback like Format Cells.
+    private func executeMsoCommand(_ msoId: String) {
+        let script = """
+        tell application "Microsoft Excel"
+            activate
+            do Visual Basic "Application.CommandBars.ExecuteMso \\"\(msoId)\\""
+        end tell
+        """
+        Logger.log("Executing MSO command: \(msoId)")
+        runAppleScript(script)
     }
 
     /// Run an AppleScript
