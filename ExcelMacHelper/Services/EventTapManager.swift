@@ -10,7 +10,7 @@ class EventTapManager: ObservableObject {
     private var runLoopSource: CFRunLoopSource?
 
     // References needed by the C callback
-    private static var shared: EventTapManager?
+    fileprivate static var shared: EventTapManager?
 
     // Callbacks
     var onOptionKeyPressed: (() -> Void)?
