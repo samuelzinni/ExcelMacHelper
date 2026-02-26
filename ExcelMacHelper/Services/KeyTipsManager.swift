@@ -245,10 +245,13 @@ class KeyTipsManager: ObservableObject {
         }
 
         let node = sequence.isEmpty ? tree.root : tree.lookup(keys: sequence)
-        let childKeys = node?.children.keys ?? []
-
-        multiCharKeys = Set(childKeys.filter { $0.count > 1 })
-        singleCharKeys = Set(childKeys.filter { $0.count == 1 })
+        if let keys = node?.children.keys {
+            multiCharKeys = Set(keys.filter { $0.count > 1 })
+            singleCharKeys = Set(keys.filter { $0.count == 1 })
+        } else {
+            multiCharKeys = []
+            singleCharKeys = []
+        }
 
         Logger.debug("Updated key lookups: \(singleCharKeys.count) single, \(multiCharKeys.count) multi")
     }
