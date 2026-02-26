@@ -158,10 +158,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openPreferences() {
         NSApp.activate(ignoringOtherApps: true)
         if #available(macOS 14.0, *) {
-            NSApp.mainMenu?.items.first?.submenu?.items.first(where: { $0.title == "Settings…" })?.performAction()
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
-        // Fallback: open settings via standard method
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 
     @objc private func openAccessibility() {
