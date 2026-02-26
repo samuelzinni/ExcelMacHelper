@@ -245,7 +245,7 @@ class KeyTipsManager: ObservableObject {
         }
 
         let node = sequence.isEmpty ? tree.root : tree.lookup(keys: sequence)
-        let childKeys = node?.children.keys ?? Dictionary<String, ShortcutTreeNode>.Keys()
+        let childKeys = node?.children.keys ?? []
 
         multiCharKeys = Set(childKeys.filter { $0.count > 1 })
         singleCharKeys = Set(childKeys.filter { $0.count == 1 })
