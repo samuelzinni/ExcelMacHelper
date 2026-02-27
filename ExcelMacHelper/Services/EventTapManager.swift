@@ -13,12 +13,17 @@ class EventTapManager: ObservableObject {
     fileprivate static var shared: EventTapManager?
 
     // Callbacks
-    var onOptionKeyPressed: (() -> Void)?
     var onOptionKeyReleased: (() -> Void)?
     var onKeyPressed: ((String, CGEventFlags) -> Bool)?  // Returns true if event should be consumed
     var onEscapePressed: (() -> Void)?
     var shouldRemapFunctionKeys: (() -> Bool)?
     var isInKeyTipsMode: (() -> Bool)?
+
+    // Option key tracking: only activate Key Tips if Option was pressed
+    // and released alone (not used as a modifier with another key).
+    // This prevents Key Tips from activating after Option+Tab, Option+V, etc.
+    private var isOptionDown: Bool = false
+    private var wasOptionUsedAsModifier: Bool = false
 
     // F1-F12 virtual key codes
     private static let functionKeyCodes: Set<CGKeyCode> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
@@ -164,9 +169,22 @@ class EventTapManager: ObservableObject {
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
 
+        // Track Option key modifier usage: if ANY key is pressed while Option
+        // is physically held down, mark Option as used as a modifier so we
+        // don't accidentally enter Key Tips mode on Option release.
+        if type == .keyDown && isOptionDown {
+            wasOptionUsedAsModifier = true
+        }
+
         // Feature 1: Function Key Remapping (for keyboard F-key events that arrive as keyDown)
         if shouldRemapFunctionKeys?() == true {
             if let remapped = handleFunctionKeyRemap(keyCode: keyCode, flags: flags, type: type, event: event) {
+                // If an F-key is pressed while Key Tips are showing, dismiss them
+                if isInKeyTipsMode?() == true {
+                    DispatchQueue.main.async {
+                        self.onEscapePressed?()
+                    }
+                }
                 return remapped
             }
         }
@@ -201,7 +219,10 @@ class EventTapManager: ObservableObject {
         Logger.debug("NX_SYSDEFINED: keyType=\(keyType) (\(keyName)) state=\(isKeyDown ? "down" : "up") [\(mapped)]")
     }
 
-    /// Handle NX_SYSDEFINED media key events and convert them to F-key events
+    /// Handle NX_SYSDEFINED media key events and convert them to F-key events.
+    /// Creates a synthetic keyboard event and posts it past all event taps
+    /// (at cgAnnotatedSessionEventTap) so it goes directly to the application
+    /// without being re-intercepted by our own tap.
     private func handleMediaKeyEvent(event: CGEvent) -> CGEvent? {
         guard let nsEvent = NSEvent(cgEvent: event) else { return event }
 
@@ -239,10 +260,11 @@ class EventTapManager: ObservableObject {
         // Set the fn flag so the system treats it as a standard function key
         syntheticEvent.flags = [.maskSecondaryFn]
 
-        // Post the synthetic F-key event separately
-        syntheticEvent.post(tap: .cghidEventTap)
+        // Post at cgAnnotatedSessionEventTap to bypass our own event tap.
+        // This sends the event directly to the frontmost application.
+        syntheticEvent.post(tap: .cgAnnotatedSessionEventTap)
 
-        Logger.debug("Converted media key \(keyName) (type \(keyType)) -> F-key code \(fKeyCode), suppressed original")
+        Logger.debug("Converted media key \(keyName) (type \(keyType)) -> F-key code \(fKeyCode)")
 
         // Return nil to suppress the original media key event
         return nil
@@ -268,28 +290,47 @@ class EventTapManager: ObservableObject {
 
     // MARK: - Feature 2: Key Tips
 
-    /// Handle flags changed events (Option/Alt key press/release)
+    /// Handle flags changed events (Option/Alt key press/release).
+    /// Only activates Key Tips when Option is pressed and released ALONE
+    /// (without any other key being pressed during the hold).
+    /// Pressing Alt again while Key Tips are active toggles them off.
     private func handleFlagsChanged(keyCode: CGKeyCode, flags: CGEventFlags, event: CGEvent) -> CGEvent? {
         let optionPressed = flags.contains(.maskAlternate)
 
         // Option key codes: 58 (left), 61 (right)
         if keyCode == 58 || keyCode == 61 {
             if optionPressed {
-                // Option key pressed - don't enter Key Tips mode yet, wait for release
+                // Option key pressed down — start tracking
+                isOptionDown = true
+                // If other modifiers (Shift, Cmd, Ctrl) are already held,
+                // this is a multi-modifier combo, not a standalone Alt press
+                let otherModifiers: CGEventFlags = [.maskShift, .maskCommand, .maskControl]
+                wasOptionUsedAsModifier = !flags.intersection(otherModifiers).isEmpty
                 return event
             } else {
-                // Option key released - activate Key Tips immediately so the
-                // next keystroke (which arrives as a separate event) sees
-                // isActive=true and gets intercepted. The heavy UI work
-                // (show overlay) still happens asynchronously via Combine
-                // observers that use receive(on: DispatchQueue.main).
-                if isInKeyTipsMode?() == true {
-                    // Already in Key Tips mode, ignore
-                    return event
+                // Option key released — check if it was a clean solo press
+                let shouldActivate = isOptionDown && !wasOptionUsedAsModifier
+                isOptionDown = false
+                wasOptionUsedAsModifier = false
+
+                if shouldActivate {
+                    if isInKeyTipsMode?() == true {
+                        // Alt pressed twice → toggle off (dismiss Key Tips)
+                        DispatchQueue.main.async {
+                            self.onEscapePressed?()
+                        }
+                    } else {
+                        // Enter Key Tips mode
+                        self.onOptionKeyReleased?()
+                    }
                 }
-                self.onOptionKeyReleased?()
                 return event
             }
+        }
+
+        // Any other modifier key change while Option is held → mark as modifier usage
+        if isOptionDown {
+            wasOptionUsedAsModifier = true
         }
 
         return event
